@@ -1,0 +1,9 @@
+[build-system]
+requires = ["maturin>=1.5.1"]
+build-backend = "maturin"
+
+[tool.maturin]
+name = "midirenderer"
+version = "0.1.0"
+authors = ["Arthur Ryzhak <ryzhakar@gmail.com>"]
+description = "My Rust library for Python"
