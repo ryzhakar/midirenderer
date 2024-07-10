@@ -1,0 +1,121 @@
+name: Build and Publish
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [created]
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, i686, aarch64]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.8'
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --strip --compatibility manylinux2014 --features=pyo3/abi3-py38
+          manylinux: auto
+      - uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: target/wheels/*.whl
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.8'
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --strip --features=pyo3/abi3-py38
+      - uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: target/wheels/*.whl
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.8'
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --strip --features=pyo3/abi3-py38
+      - name: Build wheels (ARM64)
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --strip --features=pyo3/abi3-py38 --target aarch64-apple-darwin
+      - uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: target/wheels/*.whl
+
+  linux-arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.8'
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+        with:
+          platforms: arm64
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: aarch64-unknown-linux-gnu
+          args: --release --strip --compatibility manylinux2014 --features=pyo3/abi3-py38
+          manylinux: auto
+      - uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: target/wheels/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --features=pyo3/abi3-py38
+      - uses: actions/upload-artifact@v3
+        with:
+          name: wheels
+          path: target/wheels/*.tar.gz
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    if: "startsWith(github.ref, 'refs/tags/')"
+    needs: [linux, windows, macos, linux-arm, sdist]
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: wheels
+          path: dist
+      - name: Publish to PyPI
+        uses: PyO3/maturin-action@v1
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        with:
+          command: upload
+          args: --skip-existing dist/*
