@@ -1,86 +1,49 @@
-use rustysynth::{MidiFile, MidiFileSequencer, SoundFont, Synthesizer, SynthesizerSettings};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use std::io::{Cursor, Write};
-use std::sync::Arc;
 
-fn write_u32(output: &mut Vec<u8>, value: u32) {
-    output.extend_from_slice(&value.to_le_bytes());
-}
-
+mod audio_utils;
+use audio_utils::{render_midi_to_wav, wav_to_opus_ogg, OpusBitrate};
 
 #[pyfunction]
-fn render_midi_with<'py>(
+fn render_wave_from<'py>(
     py: Python<'py>,
     soundfont_bytes: &[u8],
-    midi_bytes: &[u8]
+    midi_bytes: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    // Load the SoundFont from bytes
-    let mut sf2 = Cursor::new(soundfont_bytes);
-    let sound_font = Arc::new(SoundFont::new(&mut sf2)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("SoundFont error: {}", e)))?);
-
-    // Load the MIDI file from bytes
-    let mut mid = Cursor::new(midi_bytes);
-    let midi_file = Arc::new(MidiFile::new(&mut mid)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("MIDI file error: {}", e)))?);
-
-    // Create the synthesizer and sequencer
-    let sample_rate = 44100;
-    let settings = SynthesizerSettings::new(sample_rate);
-    let synthesizer = Synthesizer::new(&sound_font, &settings)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Synthesizer error: {}", e)))?;
-    let mut sequencer = MidiFileSequencer::new(synthesizer);
-
-    // Prepare to play the MIDI file
-    sequencer.play(&midi_file, false);
-
-    // Calculate the total number of samples
-    let sample_count = (sample_rate as f64 * midi_file.get_length()) as usize;
-    
-    // Create buffers for left and right channels
-    let mut left: Vec<f32> = vec![0.0; sample_count];
-    let mut right: Vec<f32> = vec![0.0; sample_count];
-
-    // Render the audio
-    sequencer.render(&mut left, &mut right);
-
-    // Prepare the WAV file data
-    let mut wav_data = Vec::new();
-
-    // Write WAV header
-    wav_data.extend_from_slice(b"RIFF");
-    write_u32(&mut wav_data, 36 + (sample_count * 4) as u32); // File size - 8
-    wav_data.extend_from_slice(b"WAVE");
-
-    // Write format chunk
-    wav_data.extend_from_slice(b"fmt ");
-    write_u32(&mut wav_data, 16); // Chunk size
-    wav_data.extend_from_slice(&1u16.to_le_bytes()); // Audio format (PCM)
-    wav_data.extend_from_slice(&2u16.to_le_bytes()); // Number of channels
-    write_u32(&mut wav_data, sample_rate as u32); // Sample rate
-    write_u32(&mut wav_data, sample_rate as u32 * 4); // Byte rate
-    wav_data.extend_from_slice(&4u16.to_le_bytes()); // Block align
-    wav_data.extend_from_slice(&16u16.to_le_bytes()); // Bits per sample
-
-    // Write data chunk header
-    wav_data.extend_from_slice(b"data");
-    write_u32(&mut wav_data, (sample_count * 4) as u32); // Chunk size
-
-    // Convert f32 samples to i16 and write to WAV data
-    for (l, r) in left.iter().zip(right.iter()) {
-        let left_sample = (l.max(-1.0).min(1.0) * 32767.0) as i16;
-        let right_sample = (r.max(-1.0).min(1.0) * 32767.0) as i16;
-        wav_data.write_all(&left_sample.to_le_bytes()).unwrap();
-        wav_data.write_all(&right_sample.to_le_bytes()).unwrap();
-    }
-
-    // Return the WAV data as Python bytes
+    let wav_data = render_midi_to_wav(soundfont_bytes, midi_bytes)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     Ok(PyBytes::new_bound(py, &wav_data))
+}
+
+#[pyfunction]
+#[pyo3(signature = (soundfont_bytes, midi_bytes, stereo=false, bitrate="auto"))]
+fn render_opus_from<'py>(
+    py: Python<'py>,
+    soundfont_bytes: &[u8],
+    midi_bytes: &[u8],
+    stereo: bool,
+    bitrate: &str,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let wav_data = render_midi_to_wav(soundfont_bytes, midi_bytes)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+    let opus_bitrate = match bitrate {
+        "auto" => OpusBitrate::Auto,
+        "max" => OpusBitrate::Max,
+        _ => bitrate.parse::<i32>().map(OpusBitrate::Bits).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid bitrate value")
+        })?,
+    };
+
+    let opus_ogg_data = wav_to_opus_ogg(&wav_data, stereo, opus_bitrate)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+    Ok(PyBytes::new_bound(py, &opus_ogg_data))
 }
 
 #[pymodule]
 fn midirenderer(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(render_midi_with, m)?)?;
+    m.add_function(wrap_pyfunction!(render_wave_from, m)?)?;
+    m.add_function(wrap_pyfunction!(render_opus_from, m)?)?;
     Ok(())
 }
