@@ -1,1 +1,10 @@
 /target
+.venv
+*.wav
+*.ogg
+*.midi
+*.mid
+*.sf2
+*.SF2
+.DS_Store
+.*.py

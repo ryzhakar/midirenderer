@@ -5,7 +5,7 @@ use std::io::{Cursor, Write};
 use std::sync::Arc;
 use thiserror::Error;
 
-const SAMPLE_RATE: i32 = 48000;
+const SAMPLE_RATE: u16 = 48000;
 const FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const MAX_PACKET_SIZE: usize = 1275; // Maximum size of an Opus packet
 
@@ -23,12 +23,14 @@ pub enum AudioError {
     WavParsing(String),
 }
 
+#[derive(Debug)]
 pub enum OpusBitrate {
     Auto,
     Max,
     Bits(i32),
 }
 
+#[derive(Debug)]
 struct WavHeader {
     channels: u16,
     sample_rate: u32,
@@ -64,7 +66,9 @@ fn parse_wav_header(data: &[u8]) -> Result<WavHeader, AudioError> {
             break;
         }
 
-        data_start += 8 + chunk_size;
+        data_start = data_start
+            .checked_add(8 + chunk_size)
+            .ok_or_else(|| AudioError::WavParsing("Invalid chunk size".to_string()))?;
     }
 
     if data_start >= data.len() {
@@ -83,35 +87,41 @@ pub fn render_midi_to_wav(
     soundfont_bytes: &[u8],
     midi_bytes: &[u8],
 ) -> Result<Vec<u8>, AudioError> {
-    // Load the SoundFont from bytes
     let mut sf2 = Cursor::new(soundfont_bytes);
     let sound_font =
         Arc::new(SoundFont::new(&mut sf2).map_err(|e| AudioError::SoundFont(e.to_string()))?);
 
-    // Load the MIDI file from bytes
     let mut mid = Cursor::new(midi_bytes);
     let midi_file = Arc::new(MidiFile::new(&mut mid).map_err(|e| AudioError::Midi(e.to_string()))?);
 
-    // Create the synthesizer and sequencer
-    let settings = SynthesizerSettings::new(SAMPLE_RATE);
+    let settings = SynthesizerSettings::new(SAMPLE_RATE as i32);
     let synthesizer = Synthesizer::new(&sound_font, &settings)
         .map_err(|e| AudioError::SoundFont(e.to_string()))?;
     let mut sequencer = MidiFileSequencer::new(synthesizer);
 
-    // Prepare to play the MIDI file
     sequencer.play(&midi_file, false);
 
-    // Calculate the total number of samples
     let sample_count = (SAMPLE_RATE as f64 * midi_file.get_length()) as usize;
+    let mut left: Vec<f32> = Vec::with_capacity(sample_count);
+    let mut right: Vec<f32> = Vec::with_capacity(sample_count);
 
-    // Create buffers for left and right channels
-    let mut left: Vec<f32> = vec![0.0; sample_count];
-    let mut right: Vec<f32> = vec![0.0; sample_count];
+    // Render audio in chunks to avoid excessive memory usage
+    const CHUNK_SIZE: usize = 1024;
+    let mut temp_left = vec![0.0; CHUNK_SIZE];
+    let mut temp_right = vec![0.0; CHUNK_SIZE];
 
-    // Render the audio
-    sequencer.render(&mut left, &mut right);
+    while left.len() < sample_count {
+        let remaining = sample_count - left.len();
+        let current_chunk_size = std::cmp::min(CHUNK_SIZE, remaining);
+        temp_left.resize(current_chunk_size, 0.0);
+        temp_right.resize(current_chunk_size, 0.0);
 
-    // Prepare the WAV file data
+        sequencer.render(&mut temp_left, &mut temp_right);
+
+        left.extend_from_slice(&temp_left);
+        right.extend_from_slice(&temp_right);
+    }
+
     let mut wav_data = Vec::new();
 
     // Write WAV header
@@ -135,8 +145,8 @@ pub fn render_midi_to_wav(
 
     // Convert f32 samples to i16 and write to WAV data
     for (l, r) in left.iter().zip(right.iter()) {
-        let left_sample = (l.clamp(-1.0, 1.0) * 32767.0) as i16;
-        let right_sample = (r.clamp(-1.0, 1.0) * 32767.0) as i16;
+        let left_sample = (l.clamp(-1.0, 0.99999994) * 32768.0) as i16;
+        let right_sample = (r.clamp(-1.0, 0.99999994) * 32768.0) as i16;
         wav_data.write_all(&left_sample.to_le_bytes())?;
         wav_data.write_all(&right_sample.to_le_bytes())?;
     }
@@ -151,35 +161,16 @@ pub fn wav_to_opus_ogg(
 ) -> Result<Vec<u8>, AudioError> {
     let wav_header = parse_wav_header(wav_data)?;
 
-    if wav_header.channels != 2
-        || wav_header.sample_rate != SAMPLE_RATE as u32
-        || wav_header.bits_per_sample != 16
-    {
-        return Err(AudioError::WavParsing("Unsupported WAV format".to_string()));
+    if wav_header.sample_rate != SAMPLE_RATE as u32 {
+        return Err(AudioError::WavParsing(format!(
+            "Unsupported sample rate. Expected {}, got {}",
+            SAMPLE_RATE, wav_header.sample_rate
+        )));
     }
 
     let pcm_data = &wav_data[wav_header.data_start..];
-    let samples: Vec<f32> = if stereo {
-        pcm_data
-            .chunks_exact(4) // 2 bytes per sample, 2 channels
-            .flat_map(|chunk| {
-                let left = i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
-                let right = i16::from_le_bytes([chunk[2], chunk[3]]) as f32 / 32768.0;
-                vec![left, right]
-            })
-            .collect()
-    } else {
-        pcm_data
-            .chunks_exact(4) // 2 bytes per sample, 2 channels
-            .map(|chunk| {
-                let left = i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
-                let right = i16::from_le_bytes([chunk[2], chunk[3]]) as f32 / 32768.0;
-                (left + right) / 2.0 // Convert stereo to mono by averaging
-            })
-            .collect()
-    };
+    let channel_count = wav_header.channels as usize;
 
-    // Create Opus encoder
     let channels = if stereo {
         Channels::Stereo
     } else {
@@ -187,57 +178,89 @@ pub fn wav_to_opus_ogg(
     };
     let mut encoder = Encoder::new(SAMPLE_RATE as u32, channels, Application::Audio)?;
 
-    // Set bitrate
     match bitrate {
         OpusBitrate::Auto => encoder.set_bitrate(Bitrate::Auto)?,
         OpusBitrate::Max => encoder.set_bitrate(Bitrate::Max)?,
         OpusBitrate::Bits(bits) => encoder.set_bitrate(Bitrate::Bits(bits))?,
     }
 
-    // Prepare OGG stream
+    // Convert PCM data to Vec<i16>, handling both mono and stereo
+    let samples: Vec<i16> = match wav_header.bits_per_sample {
+        16 => pcm_data
+            .chunks_exact(2 * channel_count)
+            .flat_map(|chunk| {
+                chunk
+                    .chunks_exact(2)
+                    .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+                    .take(if stereo { 2 } else { 1 })
+            })
+            .collect(),
+        8 => pcm_data
+            .iter()
+            .map(|&sample| ((sample as i16 - 128) << 8))
+            .collect(),
+        _ => {
+            return Err(AudioError::WavParsing(format!(
+                "Unsupported bit depth: {}",
+                wav_header.bits_per_sample
+            )))
+        }
+    };
+
     let mut ogg_output = Vec::new();
-    let mut packet_writer = PacketWriter::new(Cursor::new(&mut ogg_output));
+    let mut granule_position = 0u64;
 
-    // Write Opus header packets
-    write_opus_header(&mut packet_writer, channels, SAMPLE_RATE as u32)?;
-    write_opus_comment_header(&mut packet_writer)?;
+    {
+        let mut packet_writer = PacketWriter::new(Cursor::new(&mut ogg_output));
 
-    // Encode and write
-    let channel_count = if stereo { 2 } else { 1 };
-    let mut granule_position = 0u32;
-    for chunk in samples.chunks(FRAME_SIZE * channel_count) {
-        let mut packet = vec![0u8; MAX_PACKET_SIZE];
-        let packet_len = encoder.encode_float(chunk, &mut packet)?;
-        packet.truncate(packet_len);
-
-        granule_position += FRAME_SIZE as u32;
-
+        // Write Opus header
+        let opus_header = create_opus_header(channels, SAMPLE_RATE as u32);
         packet_writer.write_packet(
-            packet,
+            opus_header,
+            1, // Serial number
+            PacketWriteEndInfo::EndPage,
+            0, // Granule position
+        )?;
+
+        // Write Opus comment header
+        let opus_comment = create_opus_comment();
+        packet_writer.write_packet(
+            opus_comment,
+            1, // Serial number
+            PacketWriteEndInfo::EndPage,
+            0, // Granule position
+        )?;
+
+        // Encode audio data
+        for chunk in samples.chunks(FRAME_SIZE * channels as usize) {
+            let mut packet = vec![0u8; MAX_PACKET_SIZE];
+            let packet_len = encoder.encode(chunk, &mut packet)?;
+            packet.truncate(packet_len);
+
+            granule_position = granule_position.saturating_add(FRAME_SIZE as u64);
+
+            packet_writer.write_packet(
+                packet,
+                1, // Serial number
+                PacketWriteEndInfo::NormalPacket,
+                granule_position,
+            )?;
+        }
+
+        // Write end of stream
+        packet_writer.write_packet(
+            Vec::new(),
+            1, // Serial number
+            PacketWriteEndInfo::EndStream,
             granule_position,
-            PacketWriteEndInfo::NormalPacket,
-            0, // timestamp
         )?;
     }
-
-    // Finalize OGG stream
-    packet_writer.write_packet(
-        Vec::new(),
-        granule_position,
-        PacketWriteEndInfo::EndStream,
-        0,
-    )?;
-    drop(packet_writer);
 
     Ok(ogg_output)
 }
 
-fn write_opus_header(
-    packet_writer: &mut PacketWriter<Cursor<&mut Vec<u8>>>,
-    channels: Channels,
-    sample_rate: u32,
-) -> Result<(), AudioError> {
-    let header = vec![
+fn create_opus_header(channels: Channels, sample_rate: u32) -> Vec<u8> {
+    let mut header = vec![
         b'O',
         b'p',
         b'u',
@@ -245,30 +268,30 @@ fn write_opus_header(
         b'H',
         b'e',
         b'a',
-        b'd',
-        1, // version
+        b'd', // Magic signature
+        1,    // Version
         channels as u8,
         0,
-        0, // pre-skip
-        (sample_rate & 0xFF) as u8,
-        ((sample_rate >> 8) & 0xFF) as u8,
-        ((sample_rate >> 16) & 0xFF) as u8,
-        ((sample_rate >> 24) & 0xFF) as u8,
+        0, // Pre-skip (3840 samples or 80ms)
+        sample_rate.to_le_bytes()[0],
+        sample_rate.to_le_bytes()[1],
+        sample_rate.to_le_bytes()[2],
+        sample_rate.to_le_bytes()[3],
         0,
-        0, // output gain
-        0, // channel mapping family
+        0, // Output gain
+        0, // Channel mapping family (0 for mono/stereo)
     ];
 
-    packet_writer.write_packet(header, 0, PacketWriteEndInfo::NormalPacket, 0)?;
+    // Set pre-skip value (3840 samples or 80ms)
+    header[10] = 0x00;
+    header[11] = 0x0F;
 
-    Ok(())
+    header
 }
 
-fn write_opus_comment_header(
-    packet_writer: &mut PacketWriter<Cursor<&mut Vec<u8>>>,
-) -> Result<(), AudioError> {
-    let comment = b"ENCODER=midirenderer";
-    let mut header = vec![
+fn create_opus_comment() -> Vec<u8> {
+    let vendor_string = b"midirenderer";
+    let mut comment = vec![
         b'O',
         b'p',
         b'u',
@@ -276,18 +299,16 @@ fn write_opus_comment_header(
         b'T',
         b'a',
         b'g',
-        b's',
-        (comment.len() & 0xFF) as u8,
-        ((comment.len() >> 8) & 0xFF) as u8,
-        ((comment.len() >> 16) & 0xFF) as u8,
-        ((comment.len() >> 24) & 0xFF) as u8,
+        b's', // Magic signature
+        (vendor_string.len() as u32).to_le_bytes()[0],
+        (vendor_string.len() as u32).to_le_bytes()[1],
+        (vendor_string.len() as u32).to_le_bytes()[2],
+        (vendor_string.len() as u32).to_le_bytes()[3],
     ];
-    header.extend_from_slice(comment);
-    header.extend_from_slice(&[0, 0, 0, 0]); // No additional comments
+    comment.extend_from_slice(vendor_string);
+    comment.extend_from_slice(&[0, 0, 0, 0]); // User comment list length
 
-    packet_writer.write_packet(header, 0, PacketWriteEndInfo::NormalPacket, 0)?;
-
-    Ok(())
+    comment
 }
 
 fn write_u32(output: &mut Vec<u8>, value: u32) -> Result<(), AudioError> {
