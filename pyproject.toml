@@ -37,5 +37,5 @@ Repository = "https://github.com/ryzhakar/midirenderer.git"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-module-name = "midirenderer"
-python-source = "python"
+# module-name = "midirenderer"
+# python-source = "python"

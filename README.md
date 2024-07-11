@@ -45,7 +45,7 @@ with open('output.opus', 'wb') as f:
 ## API
 
 - `render_wave_from(soundfont_bytes: bytes, midi_bytes: bytes) -> bytes`
-- `render_opus_from(soundfont_bytes: bytes, midi_bytes: bytes, stereo: bool = False, bitrate: str = "auto") -> bytes`
+- `render_opus_from(soundfont_bytes: bytes, midi_bytes: bytes, stereo: bool = True, bitrate: str = "auto") -> bytes`
 
 ## Requirements
 

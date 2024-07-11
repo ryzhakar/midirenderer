@@ -16,7 +16,7 @@ fn render_wave_from<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (soundfont_bytes, midi_bytes, stereo=false, bitrate="auto"))]
+#[pyo3(signature = (soundfont_bytes, midi_bytes, stereo=true, bitrate="auto"))]
 fn render_opus_from<'py>(
     py: Python<'py>,
     soundfont_bytes: &[u8],
