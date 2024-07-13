@@ -6,8 +6,10 @@ use std::sync::Arc;
 use thiserror::Error;
 
 const SAMPLE_RATE: u16 = 48000;
-const FRAME_SIZE: usize = 480; // 10ms at 48kHz
-const MAX_PACKET_SIZE: usize = 1275; // Maximum size of an Opus packet
+const FRAME_SIZE: usize = 960; // 20ms at 48kHz
+// Maximum size of an Opus packet puts a ceiling on bitrate?
+// This is calculated for max of 256 kbit/s
+const MAX_PACKET_SIZE: usize = 640;
 
 #[derive(Debug, Error)]
 pub enum AudioError {
@@ -242,6 +244,7 @@ pub fn wav_to_opus_ogg(
             // We pad the last chunk up to the frame size.
             let chunk = &(pad_chunk(chunk, channels as usize));
             let _packet_len = encoder.encode(chunk, &mut packet)?;
+            packet.truncate(MAX_PACKET_SIZE);
 
             granule_position = granule_position.saturating_add(FRAME_SIZE as u64);
 
