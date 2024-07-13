@@ -6,9 +6,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 const SAMPLE_RATE: u16 = 48000;
-const FRAME_SIZE: usize = 960; // 20ms at 48kHz
+const FRAME_SIZE: usize = 480; // 10ms at 48kHz
 const MAX_PACKET_SIZE: usize = 1275; // Maximum size of an Opus packet
-const MINIMUM_FRAME_SIZE: usize = 480; // 10ms at 48kHz
 
 #[derive(Debug, Error)]
 pub enum AudioError {
@@ -236,12 +235,13 @@ pub fn wav_to_opus_ogg(
             let mut packet = vec![0u8; MAX_PACKET_SIZE];
             // Underlying C implementation of OPUS encoder
             // cannot deal with frames shorter then 10ms.
-            // The only chunk that can be shorter is the last one.
-            // We pad the last chunk up to the minimum length.
-            // TODO: smart length-aware iteration to avoid short chunks
+            // Additionally, the input should always be frame-sized???
+            //
+            // Since we take the data in frame-sized chunks,
+            // the only case when this would happen is the last chunk.
+            // We pad the last chunk up to the frame size.
             let chunk = &(pad_chunk(chunk, channels as usize));
-            let packet_len = encoder.encode(chunk, &mut packet)?;
-            packet.truncate(packet_len);
+            let _packet_len = encoder.encode(chunk, &mut packet)?;
 
             granule_position = granule_position.saturating_add(FRAME_SIZE as u64);
 
@@ -266,7 +266,7 @@ pub fn wav_to_opus_ogg(
 }
 
 fn pad_chunk(chunk: &[i16], channels: usize) -> Vec<i16> {
-    let min_length = MINIMUM_FRAME_SIZE * channels;
+    let min_length = FRAME_SIZE * channels;
     let padding_size = (min_length as i16) - (chunk.len() as i16);
     if padding_size < 1 {
         return chunk.to_vec();
