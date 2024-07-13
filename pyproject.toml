@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "midirenderer"
-version = "0.1.0"
+version = "0.1.1"
 description = "High-performance library for rendering MIDI files to WAV and Opus formats using SoundFonts"
 authors = [
     {name = "Arthur Ryzhak", email = "ryzhakar@gmail.com"},

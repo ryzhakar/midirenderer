@@ -8,6 +8,7 @@ use thiserror::Error;
 const SAMPLE_RATE: u16 = 48000;
 const FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const MAX_PACKET_SIZE: usize = 1275; // Maximum size of an Opus packet
+const MINIMUM_FRAME_SIZE: usize = 480; // 10ms at 48kHz
 
 #[derive(Debug, Error)]
 pub enum AudioError {
@@ -183,7 +184,6 @@ pub fn wav_to_opus_ogg(
         OpusBitrate::Max => encoder.set_bitrate(Bitrate::Max)?,
         OpusBitrate::Bits(bits) => encoder.set_bitrate(Bitrate::Bits(bits))?,
     }
-
     // Convert PCM data to Vec<i16>, handling both mono and stereo
     let samples: Vec<i16> = match wav_header.bits_per_sample {
         16 => pcm_data
@@ -234,6 +234,12 @@ pub fn wav_to_opus_ogg(
         // Encode audio data
         for chunk in samples.chunks(FRAME_SIZE * channels as usize) {
             let mut packet = vec![0u8; MAX_PACKET_SIZE];
+            // Underlying C implementation of OPUS encoder
+            // cannot deal with frames shorter then 10ms.
+            // The only chunk that can be shorter is the last one.
+            // We pad the last chunk up to the minimum length.
+            // TODO: smart length-aware iteration to avoid short chunks
+            let chunk = &(pad_chunk(chunk, channels as usize));
             let packet_len = encoder.encode(chunk, &mut packet)?;
             packet.truncate(packet_len);
 
@@ -257,6 +263,17 @@ pub fn wav_to_opus_ogg(
     }
 
     Ok(ogg_output)
+}
+
+fn pad_chunk(chunk: &[i16], channels: usize) -> Vec<i16> {
+    let min_length = MINIMUM_FRAME_SIZE * channels;
+    let padding_size = (min_length as i16) - (chunk.len() as i16);
+    if padding_size < 1 {
+        return chunk.to_vec();
+    }
+    let mut padded = chunk.to_vec();
+    padded.extend(std::iter::repeat(0 as i16).take(padding_size as usize));
+    padded
 }
 
 fn create_opus_header(channels: Channels, sample_rate: u32) -> Vec<u8> {
